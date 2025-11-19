@@ -129,7 +129,7 @@ jobs:
         fi
         echo "✅ .gitignore properly configured"
 
-  # =============================================================================
+# =============================================================================
   # JOB 5: BUILD SUCCESS NOTIFICATION
   # =============================================================================
   build-summary:
@@ -149,21 +149,8 @@ jobs:
         echo "Unit Tests: ${{ needs.unit-tests.result }}"
         echo "Security Policy: ${{ needs.security-policy.result }}"
         echo "==================================="
-        
         if [ "${{ needs.security-policy.result }}" == "failure" ]; then
-          echo "❌ CRITICAL SECURITY ISSUE DETECTED!"
+          echo "CRITICAL SECURITY ISSUE DETECTED"
           exit 1
         fi
-        
-        echo "✅ All critical checks passed!"
-```
-
----
-
-## ✅ **Step 3: Verify Structure**
-
-Your project should now have:
-```
-.github/
-└── workflows/
-    └── security.yml
+        echo "All critical checks passed"
