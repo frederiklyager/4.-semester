@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+import logging
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from src.eval.schemas import validate_co2_raw, validate_co2_hourly, CO2_RAW_SCHEMA, CO2_HOURLY_SCHEMA
+
+# Use built-in logging instead
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 import argparse
 import os
 from dataclasses import dataclass
-from pathlib import Path
 
 import pandas as pd
 import requests
 from dotenv import load_dotenv
-
-from src.eval.schemas import CO2Schema
 
 load_dotenv()
 
@@ -57,7 +68,17 @@ def _normalize(df: pd.DataFrame, zone: str) -> pd.DataFrame:
     df = df.dropna(subset=["ts"])
     df["zone"] = zone
     df = df[["ts", "zone", "co2_g_per_kwh"]].sort_values("ts").reset_index(drop=True)
-    CO2Schema.validate(df)
+    
+    # Validate with new comprehensive schema
+    try:
+        df_validate = df.rename(columns={"zone": "area"})
+        df_validate = validate_co2_raw(df_validate, raise_on_error=True)
+        df = df_validate.rename(columns={"area": "zone"})
+        logger.info(f"✅ CO2 data validated: {len(df)} rows for zone {zone}")
+    except Exception as e:
+        logger.error(f"❌ CO2 validation failed for zone {zone}: {e}")
+        raise
+    
     return df
 
 
@@ -65,6 +86,9 @@ def _maybe_resample_to_hourly(df: pd.DataFrame, zone: str) -> pd.DataFrame:
     # Hvis data er 5-min, så aggrégér til time-middel
     dt = (df["ts"].diff().dropna().dt.total_seconds().median() or 3600)
     if dt < 3600:  # 5 min ~ 300s
+        # Store the timezone before resampling
+        original_tz = df["ts"].dt.tz
+        
         df = (
             df.set_index("ts")
               .resample("1h")  # 'H' deprecated → brug '1h'
@@ -72,6 +96,13 @@ def _maybe_resample_to_hourly(df: pd.DataFrame, zone: str) -> pd.DataFrame:
               .dropna()
               .reset_index()
         )
+        
+        # Restore timezone if it was lost
+        if original_tz is not None and df["ts"].dt.tz is None:
+            df["ts"] = df["ts"].dt.tz_localize(original_tz)
+        elif original_tz is not None and df["ts"].dt.tz != original_tz:
+            df["ts"] = df["ts"].dt.tz_convert(original_tz)
+        
         # tilføj konstant zone-kolonne igen
         df["zone"] = zone
         df = df[["ts", "zone", "co2_g_per_kwh"]]
@@ -122,7 +153,7 @@ def ingest_from_api(zone: str, start: str, end: str, resolution: str = "hourly")
     for base in base_candidates:
         try:
             r = requests.get(base, params=params, timeout=60)
-            print("DEBUG URL:", r.url)  # så vi ser præcis hvad der sendes
+           
             if r.status_code >= 400:
                 try:
                     msg = r.json().get("message")
@@ -165,7 +196,32 @@ def ingest_from_api(zone: str, start: str, end: str, resolution: str = "hourly")
 
             # hvis 5-min data → resample til time
             df = _maybe_resample_to_hourly(df, zone)
-            CO2Schema.validate(df)
+            
+            # Ensure timestamps are timezone-aware (might be lost during resampling)
+            if df['ts'].dt.tz is None:
+                df['ts'] = df['ts'].dt.tz_localize('UTC')
+                
+            
+            # Validate with new comprehensive schema
+            try:
+                # CO2_HOURLY_SCHEMA only expects 'ts' and 'co2_g_per_kwh'
+                # So we validate without the 'zone' column, then add it back
+                df_for_validation = df[['ts', 'co2_g_per_kwh']].copy()
+                
+                # Force timezone awareness (copy() can strip it)
+                if df_for_validation['ts'].dt.tz is None:
+                    df_for_validation['ts'] = df_for_validation['ts'].dt.tz_localize('UTC')
+
+                df_validated = validate_co2_hourly(df_for_validation, raise_on_error=True)
+                
+                # Add zone back after validation
+                df_validated['zone'] = zone
+                df = df_validated[['ts', 'zone', 'co2_g_per_kwh']]
+                logger.info(f"✅ CO2 hourly data validated: {len(df)} rows for zone {zone}")
+            except Exception as e:
+                logger.error(f"❌ CO2 hourly validation failed for zone {zone}: {e}")
+                raise
+            
             return df
 
         except Exception as e:
