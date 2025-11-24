@@ -14,6 +14,15 @@ from datetime import datetime
 from typing import Tuple, Optional, Dict, List
 import warnings
 import pickle
+import sys
+import os
+
+
+# Fix Windows console encoding for emojis
+if sys.platform == 'win32':
+    os.system('chcp 65001 >nul')
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
 
 warnings.filterwarnings('ignore')
 

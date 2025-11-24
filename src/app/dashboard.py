@@ -1,7 +1,6 @@
 # src/app/dashboard.py
 """
-Enhanced Energy Forecast Dashboard - Phase 5 (Step 1a: Evaluation Tab)
-Includes: Prices, CO₂, Baseline, ML, and NEW Evaluation tab
+
 Author: Frederik Lyager
 Date: November 2024
 """
@@ -11,8 +10,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import os
+import numpy as np
+import time
+import json
 
 st.set_page_config(
     page_title="⚡ Energy Forecast - Complete System",
@@ -119,11 +121,12 @@ with st.sidebar:
 # TABS
 # ===========================
 
-tab_prices, tab_co2, tab_forecast, tab_ml, tab_eval, tab_security = st.tabs([
+tab_prices, tab_co2, tab_forecast, tab_ml, tab_live_forecast, tab_eval, tab_security = st.tabs([
     "📈 Electricity Prices",
-    "🌿 CO₂ Overview", 
+    "🌿 CO₂ Overview",
     "🎯 Baseline Forecasts",
     "🤖 ML Forecasts",
+    "🔮 Live 24h Forecast",  
     "📊 Evaluation",
     "🔒 Security"
 ])
@@ -226,256 +229,563 @@ with tab_co2:
 with tab_forecast:
     st.header(f"🎯 Baseline Forecast Models - {zone}")
     
-    forecast_file = f"data/forecast/co2_{zone}.csv"
+    # FIXED: Look for correct filename with "_baseline" suffix
+    forecast_file = f"data/forecast/co2_{zone}_baseline.csv"
     df_forecast = load_csv(forecast_file, parse_dates=["ts"])
     
     if df_forecast.empty:
         st.warning(f"⚠️ No baseline forecasts found. Run: `python src/models/baseline.py`")
     else:
-        viz_type = st.radio(
-            "Visualization Style",
-            ["Combined View", "Separate Models"],
-            horizontal=True
-        )
+        # Show what we found
+        st.success(f"✅ Loaded {len(df_forecast)} forecast rows")
         
-        if viz_type == "Combined View":
+        # Check what columns we actually have
+        st.write("**Available columns:**", list(df_forecast.columns))
+        
+        # Your baseline.py creates columns: ['ts', 'actual', 'forecast']
+        # So we'll use those column names
+        
+        if 'ts' in df_forecast.columns and 'actual' in df_forecast.columns and 'forecast' in df_forecast.columns:
+            
+            # Basic forecast visualization
+            st.subheader("📈 Baseline Forecast vs Actual")
+            
             fig = go.Figure()
             
             fig.add_trace(go.Scatter(
-                x=df_forecast["ts"], y=df_forecast["actual"],
-                name="Actual", line=dict(color='black', width=2), mode='lines'
+                x=df_forecast["ts"], 
+                y=df_forecast["actual"],
+                name="Actual", 
+                line=dict(color='black', width=2), 
+                mode='lines'
             ))
+            
             fig.add_trace(go.Scatter(
-                x=df_forecast["ts"], y=df_forecast["persistence"],
-                name="Persistence", line=dict(color='blue', width=1.5), mode='lines'
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_forecast["ts"], y=df_forecast["moving_avg"],
-                name="Moving Average", line=dict(color='orange', width=1.5), mode='lines'
+                x=df_forecast["ts"], 
+                y=df_forecast["forecast"],
+                name="Baseline Forecast", 
+                line=dict(color='blue', width=1.5), 
+                mode='lines'
             ))
             
             fig.update_layout(
-                title=f"Baseline Forecast Comparison - {zone}",
-                xaxis_title="Time", yaxis_title="CO₂ Intensity (g/kWh)",
-                hovermode='x unified', height=500
+                title=f"Baseline Forecast - {zone}",
+                xaxis_title="Time", 
+                yaxis_title="CO₂ Intensity (g/kWh)",
+                hovermode='x unified', 
+                height=500
             )
             st.plotly_chart(fig, use_container_width=True)
+            
+            # Calculate metrics on the fly
+            st.subheader("📊 Performance Metrics")
+            
+            # Remove any NaN values
+            df_clean = df_forecast.dropna(subset=['actual', 'forecast'])
+            
+            if len(df_clean) > 0:
+                actual = df_clean['actual'].values
+                predicted = df_clean['forecast'].values
+                
+                # Calculate metrics
+                mae = np.mean(np.abs(actual - predicted))
+                rmse = np.sqrt(np.mean((actual - predicted)**2))
+                mape = np.mean(np.abs((actual - predicted) / actual)) * 100
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("MAE", f"{mae:.2f} g/kWh")
+                
+                with col2:
+                    st.metric("RMSE", f"{rmse:.2f} g/kWh")
+                
+                with col3:
+                    st.metric("MAPE", f"{mape:.2f}%")
+                
+                # Show recent data
+                st.subheader("📋 Recent Forecasts")
+                st.dataframe(
+                    df_forecast.tail(24)[['ts', 'actual', 'forecast']],
+                    use_container_width=True
+                )
+            else:
+                st.warning("No valid data for metrics calculation")
+        
         else:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                fig_pers = go.Figure()
-                fig_pers.add_trace(go.Scatter(x=df_forecast["ts"], y=df_forecast["actual"], 
-                                             name="Actual", line=dict(color='black')))
-                fig_pers.add_trace(go.Scatter(x=df_forecast["ts"], y=df_forecast["persistence"],
-                                             name="Persistence", line=dict(color='blue')))
-                fig_pers.update_layout(title="Persistence Model", height=350)
-                st.plotly_chart(fig_pers, use_container_width=True)
-            
-            with col2:
-                fig_ma = go.Figure()
-                fig_ma.add_trace(go.Scatter(x=df_forecast["ts"], y=df_forecast["actual"],
-                                           name="Actual", line=dict(color='black')))
-                fig_ma.add_trace(go.Scatter(x=df_forecast["ts"], y=df_forecast["moving_avg"],
-                                           name="Moving Avg", line=dict(color='orange')))
-                fig_ma.update_layout(title="Moving Average Model", height=350)
-                st.plotly_chart(fig_ma, use_container_width=True)
-        
-        st.subheader("📊 Performance Metrics")
-        
-        metrics_file = f"data/forecast/metrics_{zone}.csv"
-        df_metrics = load_csv(metrics_file)
-        
-        if not df_metrics.empty:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**Persistence Model**")
-                pers_metrics = df_metrics[df_metrics["model"] == "persistence"].iloc[0]
-                st.metric("MAE", f"{pers_metrics['mae']:.2f} g CO₂/kWh")
-                st.metric("RMSE", f"{pers_metrics['rmse']:.2f} g CO₂/kWh")
-                st.metric("MAPE", f"{pers_metrics['mape']:.2f}%")
-            
-            with col2:
-                st.markdown("**Moving Average Model**")
-                ma_metrics = df_metrics[df_metrics["model"] == "moving_avg"].iloc[0]
-                st.metric("MAE", f"{ma_metrics['mae']:.2f} g CO₂/kWh")
-                st.metric("RMSE", f"{ma_metrics['rmse']:.2f} g CO₂/kWh")
-                st.metric("MAPE", f"{ma_metrics['mape']:.2f}%")
+            st.error(f"❌ Unexpected columns in forecast file. Expected: ['ts', 'actual', 'forecast']")
+            st.write("Found columns:", list(df_forecast.columns))
+            st.write("First few rows:")
+            st.dataframe(df_forecast.head())
+
+# ADD THIS TO YOUR DASHBOARD - ML FORECASTS TAB
+# Replace or enhance your existing ML forecasts section
 
 # ===========================
-# TAB 4: ML FORECASTS
+# TAB: ML FORECASTS (Enhanced)
 # ===========================
 
 with tab_ml:
-    st.header(f"🤖 Machine Learning Forecasts - {zone}")
-    st.caption("LightGBM Gradient Boosting Model | Phase 4")
+    st.header(f"🤖 ML Forecasts - {zone}")
     
-    ml_forecast_file = f"data/forecast/co2_{zone}_ml.csv"
-    df_ml = load_csv(ml_forecast_file, parse_dates=["ts"])
+    # Refresh controls at top
+    col1, col2, col3 = st.columns([2, 1, 1])
     
-    baseline_forecast_file = f"data/forecast/co2_{zone}.csv"
-    df_baseline = load_csv(baseline_forecast_file, parse_dates=["ts"])
+    with col1:
+        st.markdown("**Update forecasts with latest data**")
     
-    if df_ml.empty:
-        st.warning(f"⚠️ No ML forecasts found. Run: `python src/models/ml_forecast.py`")
+    with col2:
+        if st.button("🔄 Refresh Forecasts", use_container_width=True):
+            with st.spinner("🔄 Updating forecasts with latest data..."):
+                import subprocess
+                import sys
+                
+                # Run ml_forecast.py
+                result = subprocess.run(
+                    [sys.executable, "src/models/ml_forecast.py"],
+                    capture_output=True,
+                    text=True,
+                    timeout=180
+                )
+                
+                if result.returncode == 0:
+                    st.success("✅ Forecasts updated!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("❌ Update failed")
+                    with st.expander("Show error"):
+                        st.code(result.stderr)
+    
+    with col3:
+        # Show last update time
+        ml_file = Path(f"data/forecast/co2_{zone}_ml.csv")
+        if ml_file.exists():
+            mod_time = datetime.fromtimestamp(ml_file.stat().st_mtime)
+            time_ago = datetime.now() - mod_time
+            hours_ago = time_ago.total_seconds() / 3600
+            
+            if hours_ago < 1:
+                time_str = f"{int(time_ago.total_seconds() / 60)}m ago"
+            else:
+                time_str = f"{hours_ago:.1f}h ago"
+            
+            st.metric("Last Update", time_str)
+    
+    st.divider()
+    
+    # Load ML forecast
+    ml_file = Path(f"data/forecast/co2_{zone}_ml.csv")
+    
+    if not ml_file.exists():
+        st.warning("⚠️ No ML forecast found. Click 'Refresh Forecasts' to generate one.")
     else:
-        st.subheader("🏆 Model Performance Overview")
+        df_ml = pd.read_csv(ml_file, parse_dates=["ts"])
         
-        mae_ml = (df_ml["actual"] - df_ml["forecast"]).abs().mean()
-        rmse_ml = ((df_ml["actual"] - df_ml["forecast"]) ** 2).mean() ** 0.5
-        mape_ml = ((df_ml["actual"] - df_ml["forecast"]).abs() / df_ml["actual"]).mean() * 100
-        
-        if not df_baseline.empty:
-            mae_baseline = (df_baseline["actual"] - df_baseline["persistence"]).abs().mean()
-            improvement = ((mae_baseline - mae_ml) / mae_baseline) * 100
+        if df_ml.empty:
+            st.error("❌ ML forecast file is empty")
         else:
-            improvement = None
+            st.success(f"✅ Loaded {len(df_ml):,} ML forecast rows")
+            
+            # Check required columns
+            required_cols = ['ts', 'actual', 'forecast']
+            
+            # Try different column name variations
+            if 'forecast' not in df_ml.columns and 'predicted' in df_ml.columns:
+                df_ml = df_ml.rename(columns={'predicted': 'forecast'})
+            
+            missing_cols = [col for col in required_cols if col not in df_ml.columns]
+            
+            if missing_cols:
+                st.error(f"❌ Missing columns: {missing_cols}")
+                st.write("Available columns:", list(df_ml.columns))
+            else:
+                # =====================================
+                # VISUALIZATION
+                # =====================================
+                
+                st.subheader("📈 ML Forecast vs Actual")
+                
+                fig = go.Figure()
+                
+                # Add actual values
+                fig.add_trace(go.Scatter(
+                    x=df_ml["ts"],
+                    y=df_ml["actual"],
+                    name="Actual CO₂",
+                    line=dict(color='black', width=2),
+                    mode='lines',
+                    hovertemplate='<b>Actual</b><br>Time: %{x}<br>CO₂: %{y:.1f} g/kWh<extra></extra>'
+                ))
+                
+                # Add ML forecast
+                fig.add_trace(go.Scatter(
+                    x=df_ml["ts"],
+                    y=df_ml["forecast"],
+                    name="ML Forecast",
+                    line=dict(color='#FF6B6B', width=2, dash='dash'),
+                    mode='lines',
+                    hovertemplate='<b>Forecast</b><br>Time: %{x}<br>CO₂: %{y:.1f} g/kWh<extra></extra>'
+                ))
+                
+                fig.update_layout(
+                    xaxis_title="Time",
+                    yaxis_title="CO₂ Intensity (g/kWh)",
+                    hovermode='x unified',
+                    height=500,
+                    template='plotly_dark',
+                    showlegend=True
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # =====================================
+                # METRICS
+                # =====================================
+                
+                st.subheader("📊 Model Performance")
+                
+                df_clean = df_ml.dropna(subset=['actual', 'forecast'])
+                
+                if len(df_clean) > 0:
+                    actual = df_clean['actual'].values
+                    predicted = df_clean['forecast'].values
+                    
+                    errors = actual - predicted
+                    mae = float(np.mean(np.abs(errors)))
+                    rmse = float(np.sqrt(np.mean(errors**2)))
+                    
+                    mask = actual != 0
+                    if mask.any():
+                        mape = float(np.mean(np.abs((actual[mask] - predicted[mask]) / actual[mask])) * 100)
+                    else:
+                        mape = np.nan
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric("MAE", f"{mae:.2f}", help="Mean Absolute Error (g CO₂/kWh)")
+                    
+                    with col2:
+                        st.metric("RMSE", f"{rmse:.2f}", help="Root Mean Square Error (g CO₂/kWh)")
+                    
+                    with col3:
+                        if not np.isnan(mape):
+                            st.metric("MAPE", f"{mape:.1f}%", help="Mean Absolute Percentage Error")
+                        else:
+                            st.metric("MAPE", "N/A")
+                    
+                    with col4:
+                        st.metric("Data Points", f"{len(df_clean):,}", help="Number of predictions")
+                    
+                    # Recent forecasts table
+                    st.subheader("📋 Recent Forecasts (Last 24 Hours)")
+                    
+                    recent = df_ml.tail(24).copy()
+                    recent['error'] = recent['actual'] - recent['forecast']
+                    recent['abs_error'] = np.abs(recent['error'])
+                    
+                    display_df = recent[['ts', 'actual', 'forecast', 'error', 'abs_error']].copy()
+                    display_df.columns = ['Timestamp', 'Actual', 'Forecast', 'Error', 'Abs Error']
+                    
+                    st.dataframe(
+                        display_df.style.format({
+                            'Actual': '{:.1f}',
+                            'Forecast': '{:.1f}',
+                            'Error': '{:.1f}',
+                            'Abs Error': '{:.1f}'
+                        }),
+                        use_container_width=True,
+                        height=400
+                    )
+                else:
+                    st.warning("⚠️ No valid data for metrics")
+
+# ADD THIS AS A NEW TAB IN YOUR DASHBOARD
+# This shows REAL future predictions (tomorrow's forecast)
+
+# ===========================
+# TAB: LIVE 24H FORECAST (Future Predictions)
+# ===========================
+
+with tab_live_forecast:
+    st.header(f"🔮 Live 24h Forecast - {zone}")
+    st.caption("Predicting the NEXT 24 hours based on latest Energinet data")
+    
+    # Controls
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        st.markdown("**Generate fresh predictions for tomorrow**")
+    
+    with col2:
+        if st.button("🚀 Generate Forecast", use_container_width=True, type="primary"):
+            with st.spinner("🔄 Fetching latest data and predicting future..."):
+                import subprocess
+                import sys
+                
+                result = subprocess.run(
+                    [sys.executable, "src/models/forecast_future.py"],
+                    capture_output=True,
+                    text=True,
+                    timeout=120
+                )
+                
+                if result.returncode == 0:
+                    st.success("✅ Future forecast generated!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("❌ Generation failed")
+                    with st.expander("Show error"):
+                        st.code(result.stderr)
+    
+    with col3:
+        # Show last update
+        forecast_file = Path(f"data/forecast/future_forecast_{zone}.csv")
+        if forecast_file.exists():
+            mod_time = datetime.fromtimestamp(forecast_file.stat().st_mtime)
+            hours_ago = (datetime.now() - mod_time).total_seconds() / 3600
+            
+            if hours_ago < 1:
+                time_str = f"{int((datetime.now() - mod_time).total_seconds() / 60)}m ago"
+            else:
+                time_str = f"{hours_ago:.1f}h ago"
+            
+            st.metric("Generated", time_str)
+    
+    st.divider()
+    
+    # Load forecast
+    forecast_file = Path(f"data/forecast/future_forecast_{zone}.csv")
+    metadata_file = Path(f"data/forecast/future_forecast_metadata_{zone}.json")
+    
+    if not forecast_file.exists():
+        st.info("👆 Click 'Generate Forecast' to create tomorrow's predictions!")
         
-        col1, col2, col3, col4 = st.columns(4)
+        st.markdown("""
+        ### What This Shows:
         
-        with col1:
-            format_metric_card("MAE", mae_ml, "g/kWh", -improvement if improvement else None)
-        with col2:
-            st.metric("RMSE", f"{rmse_ml:.2f} g/kWh")
-        with col3:
-            st.metric("MAPE", f"{mape_ml:.2f}%")
-        with col4:
-            if improvement:
-                st.metric("vs Baseline", f"{improvement:.1f}%", delta="Improvement")
+        - **Real-time predictions** for the next 24 hours
+        - Based on **latest data** from Energinet API
+        - **Green hours** recommendation (best times for energy use)
+        - Updates **daily** with fresh predictions
         
-        st.subheader("📈 Forecast Visualization")
+        ### How It Works:
         
-        viz_option = st.radio(
-            "Select View",
-            ["ML vs Actual", "ML vs Baseline", "All Models Comparison"],
-            horizontal=True
-        )
+        1. Fetches TODAY's actual CO₂ data
+        2. Uses your trained ML model
+        3. Predicts TOMORROW's CO₂ intensity
+        4. Identifies optimal hours for energy consumption
+        """)
+    else:
+        # Load forecast data
+        df_forecast = pd.read_csv(forecast_file, parse_dates=["ts"])
+        
+        st.success(f"✅ Forecast loaded: {len(df_forecast)} hours ahead")
+        
+        # Load metadata
+        if metadata_file.exists():
+            with open(metadata_file) as f:
+                meta = json.load(f)
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    "Horizon",
+                    f"{meta['horizon_hours']}h",
+                    help="Hours into the future"
+                )
+            
+            with col2:
+                st.metric(
+                    "Avg CO₂",
+                    f"{meta['forecast_mean']:.1f}",
+                    help="Average predicted intensity (g/kWh)"
+                )
+            
+            with col3:
+                st.metric(
+                    "Min CO₂",
+                    f"{meta['forecast_min']:.1f}",
+                    delta=f"-{meta['forecast_mean'] - meta['forecast_min']:.1f}",
+                    delta_color="inverse",
+                    help="Lowest predicted CO₂ (best time!)"
+                )
+            
+            with col4:
+                st.metric(
+                    "Max CO₂",
+                    f"{meta['forecast_max']:.1f}",
+                    delta=f"+{meta['forecast_max'] - meta['forecast_mean']:.1f}",
+                    delta_color="normal",
+                    help="Highest predicted CO₂ (avoid if possible)"
+                )
+        
+        st.divider()
+        
+        # =====================================
+        # FUTURE FORECAST CHART
+        # =====================================
+        
+        st.subheader("📈 Tomorrow's CO₂ Forecast")
         
         fig = go.Figure()
         
-        if viz_option == "ML vs Actual":
-            fig.add_trace(go.Scatter(
-                x=df_ml["ts"], y=df_ml["actual"],
-                name="Actual", line=dict(color='black', width=2), mode='lines'
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_ml["ts"], y=df_ml["forecast"],
-                name="ML Forecast (LightGBM)", line=dict(color='#d62728', width=2), mode='lines'
-            ))
-            fig.update_layout(title=f"ML Forecast vs Actual - {zone}")
+        # Add forecast line
+        fig.add_trace(go.Scatter(
+            x=df_forecast["ts"],
+            y=df_forecast["forecast_co2"],
+            name="Predicted CO₂",
+            line=dict(color='#4ECDC4', width=3),
+            mode='lines+markers',
+            marker=dict(size=6),
+            fill='tozeroy',
+            fillcolor='rgba(78, 205, 196, 0.1)',
+            hovertemplate='<b>Prediction</b><br>%{x|%a %H:%M}<br>CO₂: %{y:.1f} g/kWh<extra></extra>'
+        ))
         
-        elif viz_option == "ML vs Baseline" and not df_baseline.empty:
-            fig.add_trace(go.Scatter(
-                x=df_ml["ts"], y=df_ml["actual"],
-                name="Actual", line=dict(color='black', width=2), mode='lines'
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_ml["ts"], y=df_ml["forecast"],
-                name="ML Forecast", line=dict(color='#d62728', width=2), mode='lines'
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_baseline["ts"], y=df_baseline["persistence"],
-                name="Baseline (Persistence)", line=dict(color='blue', width=1.5, dash='dash'), mode='lines'
-            ))
-            fig.update_layout(title=f"ML vs Baseline Forecast - {zone}")
+        # Mark NOW
+        # Mark NOW (only if within forecast range)
+        now = pd.Timestamp.now(tz='UTC')
+        if now < df_forecast['ts'].max():
+            fig.add_vline(
+                x=now,
+                line_dash="dash",
+                line_color="yellow",
+                annotation_text="Now",
+                annotation_position="top"
+            )
         
-        elif not df_baseline.empty:  # All Models
-            fig.add_trace(go.Scatter(
-                x=df_ml["ts"], y=df_ml["actual"],
-                name="Actual", line=dict(color='black', width=2.5), mode='lines'
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_ml["ts"], y=df_ml["forecast"],
-                name="ML (LightGBM)", line=dict(color='#d62728', width=2), mode='lines'
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_baseline["ts"], y=df_baseline["persistence"],
-                name="Persistence", line=dict(color='blue', width=1.5, dash='dot'), mode='lines'
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_baseline["ts"], y=df_baseline["moving_avg"],
-                name="Moving Average", line=dict(color='orange', width=1.5, dash='dot'), mode='lines'
-            ))
-            fig.update_layout(title=f"Complete Model Comparison - {zone}")
+        # Highlight GREEN hours (5 best)
+        green_hours = df_forecast.nsmallest(5, 'forecast_co2')
+        fig.add_trace(go.Scatter(
+            x=green_hours["ts"],
+            y=green_hours["forecast_co2"],
+            name="🌿 Green Hours",
+            mode='markers',
+            marker=dict(size=15, color='#2ECC71', symbol='star', line=dict(width=2, color='white')),
+            hovertemplate='<b>GREEN HOUR!</b><br>%{x|%a %H:%M}<br>CO₂: %{y:.1f} g/kWh<extra></extra>'
+        ))
+        
+        # Highlight RED hours (5 worst)
+        red_hours = df_forecast.nlargest(5, 'forecast_co2')
+        fig.add_trace(go.Scatter(
+            x=red_hours["ts"],
+            y=red_hours["forecast_co2"],
+            name="🔴 High CO₂ Hours",
+            mode='markers',
+            marker=dict(size=12, color='#E74C3C', symbol='x', line=dict(width=2, color='white')),
+            hovertemplate='<b>Avoid if possible</b><br>%{x|%a %H:%M}<br>CO₂: %{y:.1f} g/kWh<extra></extra>'
+        ))
         
         fig.update_layout(
-            xaxis_title="Time", yaxis_title="CO₂ Intensity (g/kWh)",
-            hovermode='x unified', height=500
+            xaxis_title="Time",
+            yaxis_title="Predicted CO₂ Intensity (g/kWh)",
+            hovermode='x unified',
+            height=500,
+            template='plotly_dark',
+            showlegend=True,
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
         )
+        
         st.plotly_chart(fig, use_container_width=True)
         
-        # Error analysis
-        st.subheader("🔍 Error Analysis")
+        # =====================================
+        # GREEN HOURS RECOMMENDATION
+        # =====================================
+        
+        st.subheader("🌿 Energy Consumption Recommendations")
+        
         col1, col2 = st.columns(2)
         
         with col1:
-            errors = df_ml["forecast"] - df_ml["actual"]
-            fig_error = px.histogram(
-                errors, nbins=50, title="Forecast Error Distribution",
-                labels={"value": "Error (g CO₂/kWh)", "count": "Frequency"}
-            )
-            fig_error.add_vline(x=0, line_dash="dash", line_color="red")
-            st.plotly_chart(fig_error, use_container_width=True)
-            st.caption(f"Mean Error: {errors.mean():.2f} g/kWh | Std Dev: {errors.std():.2f} g/kWh")
-        
-        with col2:
-            fig_scatter = px.scatter(
-                df_ml, x="actual", y="forecast",
-                title="Actual vs Predicted",
-                labels={"actual": "Actual CO₂ (g/kWh)", "forecast": "Predicted CO₂ (g/kWh)"},
-                opacity=0.6
-            )
-            max_val = max(df_ml["actual"].max(), df_ml["forecast"].max())
-            fig_scatter.add_trace(go.Scatter(
-                x=[0, max_val], y=[0, max_val],
-                mode='lines', name='Perfect Prediction',
-                line=dict(color='red', dash='dash')
-            ))
-            st.plotly_chart(fig_scatter, use_container_width=True)
-        
-        # Feature importance
-        st.subheader("🎯 Feature Importance")
-        importance_img = f"data/models/feature_importance_{zone}.png"
-        if Path(importance_img).exists():
-            st.image(importance_img, caption=f"Top 15 Most Important Features - {zone}")
-        else:
-            st.info("Feature importance plot not found.")
-        
-        # Comparison table
-        if not df_baseline.empty:
-            st.subheader("📊 Complete Performance Comparison")
+            st.markdown("**🟢 BEST Times (Lowest CO₂)**")
+            st.caption("Schedule high-energy tasks during these hours:")
             
-            mae_pers = (df_baseline["actual"] - df_baseline["persistence"]).abs().mean()
-            mae_ma = (df_baseline["actual"] - df_baseline["moving_avg"]).abs().mean()
+            best_5 = df_forecast.nsmallest(5, 'forecast_co2').copy()
+            best_5['time'] = best_5['ts'].dt.strftime('%a %H:%M')
+            best_5['recommendation'] = '✅ Optimal'
             
-            comparison_data = {
-                "Model": ["Persistence", "Moving Average", "LightGBM (ML)"],
-                "MAE (g/kWh)": [mae_pers, mae_ma, mae_ml],
-                "RMSE (g/kWh)": [
-                    ((df_baseline["actual"] - df_baseline["persistence"]) ** 2).mean() ** 0.5,
-                    ((df_baseline["actual"] - df_baseline["moving_avg"]) ** 2).mean() ** 0.5,
-                    rmse_ml
-                ],
-                "MAPE (%)": [
-                    ((df_baseline["actual"] - df_baseline["persistence"]).abs() / df_baseline["actual"]).mean() * 100,
-                    ((df_baseline["actual"] - df_baseline["moving_avg"]).abs() / df_baseline["actual"]).mean() * 100,
-                    mape_ml
-                ]
-            }
+            display = best_5[['time', 'forecast_co2', 'recommendation']].copy()
+            display.columns = ['Time', 'CO₂ (g/kWh)', 'Status']
             
-            df_comparison = pd.DataFrame(comparison_data)
             st.dataframe(
-                df_comparison.style.highlight_min(axis=0, subset=["MAE (g/kWh)", "RMSE (g/kWh)", "MAPE (%)"], color='lightgreen'),
+                display.style.format({'CO₂ (g/kWh)': '{:.1f}'}).background_gradient(
+                    subset=['CO₂ (g/kWh)'], cmap='Greens_r'
+                ),
+                hide_index=True,
                 use_container_width=True
             )
             
-            st.success(f"""
-            ✅ **LightGBM improves over best baseline by:**
-            - MAE: {((min(mae_pers, mae_ma) - mae_ml) / min(mae_pers, mae_ma) * 100):.1f}%
-            - Best baseline MAE: {min(mae_pers, mae_ma):.2f} g/kWh
-            - ML MAE: {mae_ml:.2f} g/kWh
-            """)
+            st.success("💡 Use washing machine, dishwasher, EV charging during these hours!")
+        
+        with col2:
+            st.markdown("**🔴 AVOID Times (Highest CO₂)**")
+            st.caption("Minimize energy use during peak emissions:")
+            
+            worst_5 = df_forecast.nlargest(5, 'forecast_co2').copy()
+            worst_5['time'] = worst_5['ts'].dt.strftime('%a %H:%M')
+            worst_5['recommendation'] = '⚠️ Avoid'
+            
+            display = worst_5[['time', 'forecast_co2', 'recommendation']].copy()
+            display.columns = ['Time', 'CO₂ (g/kWh)', 'Status']
+            
+            st.dataframe(
+                display.style.format({'CO₂ (g/kWh)': '{:.1f}'}).background_gradient(
+                    subset=['CO₂ (g/kWh)'], cmap='Reds'
+                ),
+                hide_index=True,
+                use_container_width=True
+            )
+            
+            st.warning("⚠️ Delay non-essential energy use if possible")
+        
+        # =====================================
+        # HOURLY BREAKDOWN
+        # =====================================
+        
+        st.subheader("📋 Complete 24-Hour Forecast")
+        
+        df_display = df_forecast.copy()
+        df_display['time'] = df_display['ts'].dt.strftime('%a %H:%M')
+        df_display['hour'] = df_display['ts'].dt.hour
+        
+        # Categorize
+        def categorize(value, df):
+            q25 = df['forecast_co2'].quantile(0.25)
+            q75 = df['forecast_co2'].quantile(0.75)
+            if value < q25:
+                return "🟢 Low"
+            elif value < q75:
+                return "🟡 Medium"
+            else:
+                return "🔴 High"
+        
+        df_display['level'] = df_display['forecast_co2'].apply(lambda x: categorize(x, df_forecast))
+        
+        display_cols = df_display[['time', 'forecast_co2', 'level']].copy()
+        display_cols.columns = ['Time', 'Predicted CO₂ (g/kWh)', 'Level']
+        
+        st.dataframe(
+            display_cols.style.format({'Predicted CO₂ (g/kWh)': '{:.1f}'}),
+            use_container_width=True,
+            height=500
+        )
+        
+        # Download button
+        st.divider()
+        
+        csv = df_forecast.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Forecast CSV",
+            data=csv,
+            file_name=f"future_forecast_{zone}_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
+
+
 
 # ===========================
 # TAB 5: EVALUATION 
