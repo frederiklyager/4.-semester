@@ -10,11 +10,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import os
 import numpy as np
 import time
 import json
+import sys
 
 st.set_page_config(
     page_title="⚡ Energy Forecast - Complete System",
@@ -26,7 +27,7 @@ st.set_page_config(
 # HELPER FUNCTIONS
 # ===========================
 
-@st.cache_data
+@st.cache_data(ttl=60)
 def load_csv(path: str, parse_dates=None) -> pd.DataFrame:
     """Load CSV with caching"""
     p = Path(path)
@@ -132,95 +133,509 @@ tab_prices, tab_co2, tab_forecast, tab_ml, tab_live_forecast, tab_eval, tab_secu
 ])
 
 # ===========================
-# TAB 1: ELECTRICITY PRICES
+# TAB 1: ELECTRICITY PRICES, day ahead
 # ===========================
 
 with tab_prices:
-    st.header(f"📈 Electricity Spot Prices - {zone}")
+    st.header("📈 Electricity Prices - Day-Ahead Market")
     
-    col1, col2 = st.columns([2, 1])
+    # Refresh controls at top
+    col1, col2, col3 = st.columns([2, 1, 1])
     
     with col1:
-        hist_path = f"data/prices_{zone}_hist.csv"
-        df_hist = load_csv(hist_path, parse_dates=["ts"])
-        
-        if df_hist.empty:
-            st.warning(f"⚠️ No historical price data found: {hist_path}")
-        else:
-            st.subheader("📊 Historical Prices (Last 30 Days)")
-            fig_hist = px.line(
-                df_hist, x="ts", y="price_eur_mwh",
-                labels={"ts": "Time", "price_eur_mwh": "EUR/MWh"},
-                title=f"Historical Electricity Prices - {zone}"
-            )
-            fig_hist.update_traces(line_color='#1f77b4')
-            st.plotly_chart(fig_hist, use_container_width=True)
-            
-            st.caption(f"**Stats:** Min: {df_hist['price_eur_mwh'].min():.2f} EUR/MWh | "
-                      f"Max: {df_hist['price_eur_mwh'].max():.2f} EUR/MWh | "
-                      f"Avg: {df_hist['price_eur_mwh'].mean():.2f} EUR/MWh")
+        st.markdown("**Fetch latest day-ahead prices from Nord Pool**")
+        st.caption("Day-ahead prices are published daily at 13:00 CET (12:00 UTC)")
     
     with col2:
-        fc_path = f"data/{zone}_price_forecast.csv"
-        df_fc = load_csv(fc_path, parse_dates=["ts"])
-        
-        if df_fc.empty:
-            st.info("ℹ️ No day-ahead forecast available yet")
-        else:
-            st.subheader("🔮 Day-Ahead Forecast")
-            st.line_chart(df_fc.set_index("ts")["price_eur_mwh"], height=250)
+        if st.button("🔄 Refresh Prices", use_container_width=True):
+            with st.spinner("📡 Fetching latest prices from Energinet..."):
+                import subprocess
+                result = subprocess.run(
+                    [sys.executable, "src/ingest/fetch_dayahead_prices.py"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                
+                if result.returncode == 0:
+                    st.success("✅ Prices updated!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("❌ Update failed")
+                    with st.expander("Show error"):
+                        st.code(result.stderr)
+    
+    with col3:
+        # Show last update
+        forecast_file = Path(f"data/{zone}_price_forecast.csv")
+        if forecast_file.exists():
+            mod_time = datetime.fromtimestamp(forecast_file.stat().st_mtime)
+            hours_ago = (datetime.now() - mod_time).total_seconds() / 3600
             
-            st.caption(f"**Next 24h:** {len(df_fc)} hours forecasted")
-            st.caption(f"**Avg forecast:** {df_fc['price_eur_mwh'].mean():.2f} EUR/MWh")
+            if hours_ago < 1:
+                time_str = f"{int((datetime.now() - mod_time).total_seconds() / 60)}m ago"
+            else:
+                time_str = f"{hours_ago:.1f}h ago"
+            
+            st.metric("Last Update", time_str)
+    
+    st.divider()
+    
+    # Area selector
+    area = st.selectbox("Select Price Area", ["DK1", "DK2"], index=0, key="price_area")
+    
+    # Load data
+    hist_path = f"data/prices_{area}_hist.csv"
+    fc_path = f"data/{area}_price_forecast.csv"
+    
+    df_hist = load_csv(hist_path, parse_dates=["ts"])
+    df_fc = load_csv(fc_path, parse_dates=["ts"])
+    
+    # Historical prices
+    st.subheader(f"📊 Recent Electricity Prices ({area})")
+    
+    if df_hist.empty:
+        st.warning(f"⚠️ No historical data. Click 'Refresh Prices' to fetch.")
+    else:
+        # Show last 7 days
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        df_recent = df_hist[df_hist['ts'] >= cutoff].copy()
+        
+        if not df_recent.empty:
+            fig = go.Figure()
+            
+            fig.add_trace(go.Scatter(
+                x=df_recent['ts'],
+                y=df_recent['price_eur_mwh'],
+                name='Historical Price',
+                line=dict(color='#FF6B6B', width=2),
+                fill='tozeroy',
+                fillcolor='rgba(255, 107, 107, 0.1)',
+                hovertemplate='<b>Price</b><br>%{x}<br>%{y:.2f} EUR/MWh<extra></extra>'
+            ))
+            
+            fig.update_layout(
+                title=f"Last 7 Days - {area}",
+                xaxis_title="Time",
+                yaxis_title="Price (EUR/MWh)",
+                hovermode='x unified',
+                height=400,
+                template='plotly_dark'
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Stats
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Avg Price", f"{df_recent['price_eur_mwh'].mean():.2f} EUR/MWh")
+            
+            with col2:
+                st.metric("Min Price", f"{df_recent['price_eur_mwh'].min():.2f} EUR/MWh")
+            
+            with col3:
+                st.metric("Max Price", f"{df_recent['price_eur_mwh'].max():.2f} EUR/MWh")
+            
+            with col4:
+                st.metric("Current", f"{df_recent['price_eur_mwh'].iloc[-1]:.2f} EUR/MWh")
+    
+    st.divider()
+    
+    # Day-ahead forecast
+    st.subheader(f"🔮 Day-Ahead Price Forecast ({area})")
+    
+    if df_fc.empty:
+        st.info("👆 Click 'Refresh Prices' to fetch latest day-ahead forecast")
+        
+        # Check if it's the right time
+        now = datetime.now(timezone.utc)
+        if now.hour < 12:
+            st.caption(f"⏰ Day-ahead prices are published at 12:00 UTC (currently {now.strftime('%H:%M UTC')})")
+        else:
+            st.caption("✅ Day-ahead prices should be available - click refresh!")
+    else:
+        st.success(f"✅ Day-ahead forecast loaded: {len(df_fc)} hours")
+        
+        # Load metadata if available
+        meta_file = Path(f"data/{area}_price_forecast_metadata.json")
+        if meta_file.exists():
+            with open(meta_file) as f:
+                meta = json.load(f)
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Hours Ahead", meta['num_hours'])
+            
+            with col2:
+                st.metric("Avg Price", f"{meta['price_avg']:.2f}", help="Average price (EUR/MWh)")
+            
+            with col3:
+                st.metric(
+                    "Cheapest", 
+                    f"{meta['price_min']:.2f}",
+                    delta=f"-{meta['price_avg'] - meta['price_min']:.2f}",
+                    delta_color="inverse",
+                    help="Lowest price (EUR/MWh)"
+                )
+            
+            with col4:
+                st.metric(
+                    "Most Expensive",
+                    f"{meta['price_max']:.2f}",
+                    delta=f"+{meta['price_max'] - meta['price_avg']:.2f}",
+                    delta_color="normal",
+                    help="Highest price (EUR/MWh)"
+                )
+        
+        # Chart
+        fig = go.Figure()
+        
+        # Add day-ahead prices
+        fig.add_trace(go.Scatter(
+            x=df_fc['ts'],
+            y=df_fc['price_eur_mwh'],
+            name='Day-Ahead Price',
+            line=dict(color='#4ECDC4', width=3),
+            mode='lines+markers',
+            marker=dict(size=6),
+            fill='tozeroy',
+            fillcolor='rgba(78, 205, 196, 0.2)',
+            hovertemplate='<b>Day-Ahead</b><br>%{x|%a %H:%M}<br>%{y:.2f} EUR/MWh<extra></extra>'
+        ))
+        
+        # Mark NOW
+        try:
+            now = pd.Timestamp.now(tz='UTC')
+            if df_fc['ts'].min() <= now <= df_fc['ts'].max():
+                fig.add_vline(
+                    x=now,
+                    line_dash="dash",
+                    line_color="yellow",
+                    annotation_text="Now",
+                    annotation_position="top"
+                )
+        except:
+            pass
+        
+        # Highlight cheapest hours
+        cheapest_5 = df_fc.nsmallest(5, 'price_eur_mwh')
+        fig.add_trace(go.Scatter(
+            x=cheapest_5['ts'],
+            y=cheapest_5['price_eur_mwh'],
+            name='💚 Cheapest Hours',
+            mode='markers',
+            marker=dict(size=15, color='#2ECC71', symbol='star', line=dict(width=2, color='white')),
+            hovertemplate='<b>CHEAP!</b><br>%{x|%a %H:%M}<br>%{y:.2f} EUR/MWh<extra></extra>'
+        ))
+        
+        # Highlight expensive hours
+        expensive_5 = df_fc.nlargest(5, 'price_eur_mwh')
+        fig.add_trace(go.Scatter(
+            x=expensive_5['ts'],
+            y=expensive_5['price_eur_mwh'],
+            name='🔴 Expensive Hours',
+            mode='markers',
+            marker=dict(size=12, color='#E74C3C', symbol='x', line=dict(width=2, color='white')),
+            hovertemplate='<b>Expensive</b><br>%{x|%a %H:%M}<br>%{y:.2f} EUR/MWh<extra></extra>'
+        ))
+        
+        fig.update_layout(
+            title=f"Day-Ahead Price Forecast - {area}",
+            xaxis_title="Time",
+            yaxis_title="Price (EUR/MWh)",
+            hovermode='x unified',
+            height=500,
+            template='plotly_dark',
+            showlegend=True
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Best times recommendation
+        st.subheader("💡 Price Recommendations")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**💚 CHEAPEST Hours**")
+            st.caption("Best times for high-energy tasks:")
+            
+            best_5 = df_fc.nsmallest(5, 'price_eur_mwh').copy()
+            best_5['time'] = best_5['ts'].dt.strftime('%a %H:%M')
+            
+            display = best_5[['time', 'price_eur_mwh']].copy()
+            display.columns = ['Time', 'Price (EUR/MWh)']
+            
+            st.dataframe(
+                display.style.format({'Price (EUR/MWh)': '{:.2f}'}).background_gradient(
+                    subset=['Price (EUR/MWh)'], cmap='Greens_r'
+                ),
+                hide_index=True,
+                use_container_width=True
+            )
+        
+        with col2:
+            st.markdown("**🔴 MOST EXPENSIVE Hours**")
+            st.caption("Minimize usage during these times:")
+            
+            worst_5 = df_fc.nlargest(5, 'price_eur_mwh').copy()
+            worst_5['time'] = worst_5['ts'].dt.strftime('%a %H:%M')
+            
+            display = worst_5[['time', 'price_eur_mwh']].copy()
+            display.columns = ['Time', 'Price (EUR/MWh)']
+            
+            st.dataframe(
+                display.style.format({'Price (EUR/MWh)': '{:.2f}'}).background_gradient(
+                    subset=['Price (EUR/MWh)'], cmap='Reds'
+                ),
+                hide_index=True,
+                use_container_width=True
+            )
+        
+        # Full table
+        st.subheader("📋 Complete Price Forecast")
+        
+        df_display = df_fc.copy()
+        df_display['time'] = df_display['ts'].dt.strftime('%a %H:%M')
+        
+        display_cols = df_display[['time', 'price_eur_mwh']].copy()
+        display_cols.columns = ['Time', 'Price (EUR/MWh)']
+        
+        st.dataframe(
+            display_cols.style.format({'Price (EUR/MWh)': '{:.2f}'}),
+            use_container_width=True,
+            height=400
+        )
 
 # ===========================
 # TAB 2: CO₂ OVERVIEW
 # ===========================
 
 with tab_co2:
-    st.header(f"🌿 CO₂ Intensity Overview - {zone}")
+    st.header("🌿 CO₂ Intensity Overview")
+    st.caption("Live data from Energinet API - Auto-refreshes every 5 minutes")
     
-    co2_file = f"data/processed/co2_{zone}.parquet"
-    df_co2 = load_parquet(co2_file)
+    # Import live data function
+    import sys
+    from pathlib import Path
+    
+    # Add live fetch function
+    import requests
+    from datetime import timedelta
+    
+    def fetch_live_co2_data(zone: str = "DK1", days: int = 7):
+        """Fetch latest CO2 data from Energinet API"""
+        EDS_URL = "https://api.energidataservice.dk/dataset/CO2Emis"
+        
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=days)
+        
+        params = {
+            "start": start.strftime("%Y-%m-%dT%H:%M"),
+            "end": end.strftime("%Y-%m-%dT%H:%M"),
+            "filter": f'{{"PriceArea":["{zone}"]}}',
+            "columns": "Minutes5DK,PriceArea,CO2Emission",
+            "limit": 10000,
+            "sort": "Minutes5DK desc",
+        }
+        
+        try:
+            r = requests.get(EDS_URL, params=params, timeout=30)
+            if r.status_code == 200:
+                data = r.json().get("records", [])
+                if data:
+                    df = pd.DataFrame(data)
+                    df = df.rename(columns={"Minutes5DK": "ts", "CO2Emission": "co2_g_per_kwh"})
+                    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+                    df["co2_g_per_kwh"] = pd.to_numeric(df["co2_g_per_kwh"], errors="coerce")
+                    df = df.dropna(subset=["co2_g_per_kwh"]).sort_values("ts")
+                    
+                    # Resample to hourly
+                    df_hourly = df.set_index("ts").resample("h")["co2_g_per_kwh"].mean().reset_index()
+                    return df_hourly, "API"
+        except:
+            pass
+        
+        return pd.DataFrame(), "Failed"
+    
+    def get_co2_data_smart(zone: str, max_age_minutes: int = 5):
+        """Get CO2 data with smart caching"""
+        cache_file = Path(f"data/processed/co2_hourly_{zone}.csv")
+        
+        needs_refresh = True
+        cache_age_minutes = None
+        
+        if cache_file.exists():
+            cache_time = datetime.fromtimestamp(cache_file.stat().st_mtime)
+            cache_age_minutes = (datetime.now() - cache_time).total_seconds() / 60
+            if cache_age_minutes < max_age_minutes:
+                needs_refresh = False
+        
+        if needs_refresh:
+            # Fetch fresh data
+            df, source = fetch_live_co2_data(zone, days=7)
+            if not df.empty:
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                df.to_csv(cache_file, index=False)
+                return df, "API (Fresh)", 0
+            elif cache_file.exists():
+                df = pd.read_csv(cache_file, parse_dates=["ts"])
+                return df, "Cache (API failed)", cache_age_minutes
+            else:
+                return pd.DataFrame(), "No data", None
+        else:
+            df = pd.read_csv(cache_file, parse_dates=["ts"])
+            return df, "Cache", cache_age_minutes
+    
+    # Controls
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        zone = st.selectbox("Select Zone", ["DK1", "DK2"], index=0, key="co2_zone")
+    
+    with col2:
+        if st.button("🔄 Refresh Now", key="co2_refresh_btn", use_container_width=True):
+            st.cache_data.clear()
+            # Force delete cache to trigger fresh fetch
+            cache_file = Path(f"data/processed/co2_hourly_{zone}.csv")
+            if cache_file.exists():
+                cache_file.unlink()
+            st.rerun()
+    
+    with col3:
+        auto_refresh = st.checkbox("Auto-refresh (5m)", value=True, key="co2_auto")
+    
+    # Auto-refresh mechanism
+    if auto_refresh:
+        # Rerun every 5 minutes (300 seconds)
+        time.sleep(0.1)  # Small delay to prevent too frequent reruns
+        # This uses Streamlit's session state to track last refresh
+        if 'last_co2_refresh' not in st.session_state:
+            st.session_state.last_co2_refresh = datetime.now()
+        
+        time_since_refresh = (datetime.now() - st.session_state.last_co2_refresh).total_seconds()
+        
+        if time_since_refresh > 300:  # 5 minutes
+            st.session_state.last_co2_refresh = datetime.now()
+            st.rerun()
+    
+    st.divider()
+    
+    # Fetch data with smart caching
+    df_co2, data_source, cache_age = get_co2_data_smart(zone, max_age_minutes=5)
     
     if df_co2.empty:
-        st.error(f"❌ No CO₂ data found. Run: `python src/ingest/energinet_co2.py`")
-    else:
-        st.subheader("📊 Historical CO₂ Intensity")
+        st.error("❌ No CO₂ data available. Click 'Refresh Now' to fetch from API.")
+        st.stop()
+    
+    # Data freshness indicator
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Data Source", data_source)
+    
+    with col2:
+        if cache_age is not None:
+            if cache_age < 1:
+                freshness = "🟢 Fresh"
+            elif cache_age < 5:
+                freshness = f"🟡 {cache_age:.1f}m old"
+            else:
+                freshness = f"🔴 {cache_age:.1f}m old"
+            st.metric("Data Age", freshness)
+        else:
+            st.metric("Data Age", "Just now")
+    
+    with col3:
+        latest_time = df_co2['ts'].max()
+        st.metric("Latest Data", latest_time.strftime("%Y-%m-%d %H:%M"))
+    
+    st.divider()
+    
+    # === HISTORICAL CO2 INTENSITY ===
+    st.subheader("📊 Historical CO₂ Intensity")
+    
+    # Last 7 days
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    df_recent = df_co2[df_co2['ts'] >= cutoff].copy()
+    
+    if not df_recent.empty:
+        fig = go.Figure()
         
-        fig_co2 = px.line(
-            df_co2, x="ts", y="co2_g_per_kwh",
-            labels={"ts": "Time", "co2_g_per_kwh": "g CO₂/kWh"},
-            title=f"CO₂ Intensity - Last 7 Days ({zone})"
-        )
-        fig_co2.update_traces(line_color='#2ca02c')
-        fig_co2.add_hline(
-            y=df_co2["co2_g_per_kwh"].mean(),
+        fig.add_trace(go.Scatter(
+            x=df_recent['ts'],
+            y=df_recent['co2_g_per_kwh'],
+            name='CO₂ Intensity',
+            line=dict(color='#2ECC71', width=2),
+            fill='tozeroy',
+            fillcolor='rgba(46, 204, 113, 0.2)',
+            hovertemplate='<b>Time:</b> %{x}<br><b>CO₂:</b> %{y:.1f} g/kWh<extra></extra>'
+        ))
+        
+        # Average line
+        avg = df_recent['co2_g_per_kwh'].mean()
+        fig.add_hline(
+            y=avg,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"Average: {df_co2['co2_g_per_kwh'].mean():.1f} g/kWh"
+            annotation_text=f"Average: {avg:.1f} g/kWh",
+            annotation_position="right"
         )
-        st.plotly_chart(fig_co2, use_container_width=True)
         
+        fig.update_layout(
+            title=f"CO₂ Intensity - Last 7 Days ({zone})",
+            xaxis_title="Time",
+            yaxis_title="g CO₂/kWh",
+            hovermode='x unified',
+            height=400,
+            template='plotly_dark'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Statistics
         col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("📉 Minimum", f"{df_co2['co2_g_per_kwh'].min():.1f} g/kWh")
-        with col2:
-            st.metric("📈 Maximum", f"{df_co2['co2_g_per_kwh'].max():.1f} g/kWh")
-        with col3:
-            st.metric("📊 Average", f"{df_co2['co2_g_per_kwh'].mean():.1f} g/kWh")
-        with col4:
-            st.metric("🔢 Data Points", f"{len(df_co2):,}")
         
-        st.subheader("🕐 Recent Observations (Last 24 Hours)")
-        st.dataframe(
-            df_co2.tail(24)[["ts", "co2_g_per_kwh"]].rename(columns={
-                "ts": "Timestamp",
-                "co2_g_per_kwh": "CO₂ (g/kWh)"
-            }),
-            use_container_width=True,
-            height=300
-        )
+        with col1:
+            st.metric("📉 Minimum", f"{df_recent['co2_g_per_kwh'].min():.1f} g/kWh")
+        
+        with col2:
+            st.metric("📈 Maximum", f"{df_recent['co2_g_per_kwh'].max():.1f} g/kWh")
+        
+        with col3:
+            st.metric("📊 Average", f"{avg:.1f} g/kWh")
+        
+        with col4:
+            st.metric("📍 Data Points", len(df_recent))
+    
+    st.divider()
+    
+    # === RECENT OBSERVATIONS ===
+    st.subheader("🕐 Recent Observations (Last 24 Hours)")
+    
+    df_last24 = df_co2.tail(24).copy()
+    df_last24['Timestamp'] = df_last24['ts'].dt.strftime('%Y-%m-%d %H:%M:%S%z')
+    df_last24['CO₂ (g/kWh)'] = df_last24['co2_g_per_kwh'].round(2)
+    
+    st.dataframe(
+        df_last24[['Timestamp', 'CO₂ (g/kWh)']].sort_values('Timestamp', ascending=False),
+        use_container_width=True,
+        height=400
+    )
+    
+    # Info box
+    st.info(f"""
+    **💡 Data Science Pipeline Active:**
+    - **Data Collection:** Real-time API integration with Energinet
+    - **Data Refresh:** Every 5 minutes (auto) or manual
+    - **Data Processing:** 5-minute intervals resampled to hourly
+    - **Cache Strategy:** Smart caching to reduce API load
+    - **Latest Update:** {df_co2['ts'].max().strftime('%Y-%m-%d %H:%M UTC')}
+    """)
+
 
 # ===========================
 # TAB 3: BASELINE FORECASTS
@@ -256,7 +671,7 @@ with tab_forecast:
                 x=df_forecast["ts"], 
                 y=df_forecast["actual"],
                 name="Actual", 
-                line=dict(color='black', width=2), 
+                line=dict(color='#4ECDC4', width=2), 
                 mode='lines'
             ))
             
@@ -413,7 +828,7 @@ with tab_ml:
                     x=df_ml["ts"],
                     y=df_ml["actual"],
                     name="Actual CO₂",
-                    line=dict(color='black', width=2),
+                    line=dict(color='#4ECDC4', width=2),
                     mode='lines',
                     hovertemplate='<b>Actual</b><br>Time: %{x}<br>CO₂: %{y:.1f} g/kWh<extra></extra>'
                 ))

@@ -23,6 +23,7 @@ EDS_URL = "https://api.energidataservice.dk/dataset/Elspotprices"
 
 def fetch_elspot(start: datetime, end: datetime, area: str) -> pd.DataFrame:
     """Hent elspot (day-ahead) priser i EUR/MWh for DK1/DK2 fra Energinet EDS."""
+    print(f"Fetching data: {start} to {end}")
     params = {
         "start":   start.strftime("%Y-%m-%dT%H:%M"),
         "end":     end.strftime("%Y-%m-%dT%H:%M"),
@@ -58,32 +59,24 @@ def fetch_elspot(start: datetime, end: datetime, area: str) -> pd.DataFrame:
     return df
 
 def main(area: str = "DK1"):
+    print(f"\n=== Henter {area} ===")
     now = datetime.now(timezone.utc)
+    print(f"Current time: {now}")
 
-    # 1) Historik - Use a specific date range we know has data
-    # Test with data from August 2024
-    start_hist = datetime(2024, 8, 1, tzinfo=timezone.utc)
-    end_hist   = datetime(2024, 9, 1, tzinfo=timezone.utc)
-    
-    print(f"Fetching historical data: {start_hist} to {end_hist}")
+    # 1) Historical (last 30 days)
+    start_hist = now - timedelta(days=30)
+    end_hist = now
     df_hist = fetch_elspot(start_hist, end_hist, area)
 
-    # 2) Day-ahead - Try to get today's prices
-    try:
-        start_da = datetime(2024, 11, 19, tzinfo=timezone.utc)  # Today
-        end_da   = datetime(2024, 11, 20, tzinfo=timezone.utc)  # Tomorrow
-        
-        print(f"Fetching day-ahead data: {start_da} to {end_da}")
-        df_da = fetch_elspot(start_da, end_da, area)
-        
-        if not df_da.empty:
-            df_da = df_da[df_da["ts"] >= start_da]
-        
-    except Exception as e:
-        logger.warning(f"⚠️ Kunne ikke hente day-ahead for {area}: {e}")
-        df_da = pd.DataFrame()
+    # 2) Day-ahead (today + next 2 days to get tomorrow's prices)
+    start_da = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_da = start_da + timedelta(days=2)
+    df_da = fetch_elspot(start_da, end_da, area)
+    
+    # Only keep future prices
+    df_da = df_da[df_da["ts"] >= now]
 
-    # 3) Gem i samme filnavne, som dashboardet allerede læser
+    # 3) Save files
     os.makedirs("data", exist_ok=True)
 
     if not df_hist.empty:
@@ -97,9 +90,3 @@ def main(area: str = "DK1"):
         print(f"✅ Gemte day-ahead → data/{area}_price_forecast.csv  ({len(df_da)} rækker)")
     else:
         print("⚠️ Ingen day-ahead publiceret endnu (prøv igen senere).")
-
-if __name__ == "__main__":
-    # Kør for begge områder, så dit eksisterende dashboard virker uændret
-    for a in ("DK1", "DK2"):
-        print(f"\n=== Henter {a} ===")
-        main(a)
