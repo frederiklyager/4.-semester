@@ -185,6 +185,12 @@ def create_ensemble(zone='DK1', lgbm_weight=0.6):
     lgbm = pd.read_csv(f'data/forecast/future_forecast_{zone}.csv', parse_dates=['ts'])
     lstm = pd.read_csv(f'data/forecast/lstm_forecast_{zone}.csv', parse_dates=['ts'])
     
+    # FIX: Standardize LightGBM column name
+    if 'forecast_co2' in lgbm.columns:
+        lgbm = lgbm.rename(columns={'forecast_co2': 'co2_g_per_kwh'})
+    elif 'predicted' in lgbm.columns:
+        lgbm = lgbm.rename(columns={'predicted': 'co2_g_per_kwh'})
+    
     # Merge
     ensemble = lgbm.merge(lstm, on='ts', suffixes=('_lgbm', '_lstm'))
     
@@ -201,6 +207,9 @@ def create_ensemble(zone='DK1', lgbm_weight=0.6):
     )
     
     print(f"✅ Ensemble forecast created (LightGBM: {lgbm_weight*100:.0f}%, LSTM: {(1-lgbm_weight)*100:.0f}%)")
+    print(f"   LightGBM avg: {ensemble['co2_g_per_kwh_lgbm'].mean():.2f} g/kWh")
+    print(f"   LSTM avg: {ensemble['co2_g_per_kwh_lstm'].mean():.2f} g/kWh")
+    print(f"   Ensemble avg: {ensemble['co2_g_per_kwh'].mean():.2f} g/kWh")
     
     return ensemble
 
