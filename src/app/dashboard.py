@@ -143,15 +143,17 @@ with tab_prices:
     col1, col2, col3 = st.columns([2, 1, 1])
     
     with col1:
-        st.markdown("**Fetch latest day-ahead prices from Nord Pool**")
-        st.caption("Day-ahead prices are published daily at 13:00 CET (12:00 UTC)")
+        st.markdown("**Fetch latest day-ahead prices from Nord Pool - demo data**")
+        
     
     with col2:
+        st.info("⚠️ Electricity prices shown are for demonstration (API data from September 2025)")
+        st.caption("Note: Real-time data requires authentication.")
         if st.button("🔄 Refresh Prices", use_container_width=True):
             with st.spinner("📡 Fetching latest prices from Energinet..."):
                 import subprocess
                 result = subprocess.run(
-                    [sys.executable, "src/ingest/fetch_dayahead_prices.py"],
+                    [sys.executable, "src/ingest/nord_pool.py"],
                     capture_output=True,
                     text=True,
                     timeout=60
@@ -244,10 +246,10 @@ with tab_prices:
     st.divider()
     
     # Day-ahead forecast
-    st.subheader(f"🔮 Day-Ahead Price Forecast ({area})")
+    st.subheader(f"🔮 Day-Ahead Price, demo data ({area})")
     
     if df_fc.empty:
-        st.info("👆 Click 'Refresh Prices' to fetch latest day-ahead forecast")
+        st.info("👆 Click 'Refresh Prices' to fetch latest day-ahead ")
         
         # Check if it's the right time
         now = datetime.now(timezone.utc)
@@ -1210,9 +1212,14 @@ with tab_eval:
             st.warning("Features (DK1): ⚠️ Missing")
         
         # Check ML model
-        model_file = Path("models/lgbm_DK1.pkl")
-        if model_file.exists():
-            model_size = model_file.stat().st_size / 1024
+        lgbm_file = Path("models/lgbm_DK1.pkl")
+        lstm_file = Path("models/lstm_DK1.keras")
+
+        if lstm_file.exists():
+            model_size = lstm_file.stat().st_size / 1024
+            st.success(f"ML Model (DK1): ✅ {model_size:.1f} KB")
+        elif lgbm_file.exists():
+            model_size = lgbm_file.stat().st_size / 1024
             st.success(f"ML Model (DK1): ✅ {model_size:.1f} KB")
         else:
             st.error("ML Model (DK1): ❌ Missing")
@@ -1252,7 +1259,7 @@ with tab_eval:
             "Phase 1: Data Ingestion": co2_file.exists(),
             "Phase 2: Feature Engineering": features_file.exists(),
             "Phase 3: Baseline Models": Path("data/forecast/co2_DK1_baseline.csv").exists(),
-            "Phase 4: ML Models": model_file.exists()
+            "Phase 4: ML Models": lstm_file.exists() or lgbm_file.exists()
         }
         
         for phase, status in phases.items():
